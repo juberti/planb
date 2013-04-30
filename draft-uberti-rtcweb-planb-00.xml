@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type='text/xsl' href='rfc2629.xslt' ?>
+
+<!DOCTYPE rfc SYSTEM 'rfc2629.dtd'>
+
+<?rfc toc='yes' ?>
+<?rfc symrefs='yes' ?>
+<?rfc sortrefs='yes'?>
+<?rfc iprnotified='no' ?>
+<?rfc strict='yes' ?>
+<?rfc compact='yes' ?>
+<rfc category='std' docName='draft-uberti-rtcweb-plan-00' ipr="trust200902">
+   <front>
+    <title abbrev='WebRTC Plan B'>
+      Plan B: a proposal for signaling multiple media sources in WebRTC.
+    </title>
+    <author initials='J.' surname='Uberti' fullname='Justin Uberti'>
+      <organization abbrev='Google'>Google</organization>
+      <address>
+        <postal>
+          <street>747 6th St S</street>
+          <city>Kirkland</city>
+          <region>WA</region>
+          <code>98033</code>
+          <country>USA</country>
+        </postal>
+        <email>justin@uberti.name</email>
+      </address>
+    </author>
+    <date />
+    <abstract>
+      <t>
+        This document explains how multiple media sources can be
+        signaled in WebRTC using SDP, but avoid the problems typically
+        encountered when doing so.
+      </t>
+    </abstract>
+  </front>
+  <middle>
+    <section title='Introduction'>
+      <t>
+"Plan B" describes a simple, flexible approach for the negotiation and exchange of multiple media sources (AKA MediaStreamTracks, or MSTs) between two WebRTC endpoints. Each MST can be individually accepted or rejected by the recipient, and preferences on these track requests (e.g. the relative priority of the tracks) can also be provided.
+</t>
+<t>
+One of the core problems with existing approaches that map MSTs to individual m= lines, is that m= lines, by their very nature, specify information about how media should be transported. This means that if N m= lines are created, N media ports (and their corresponding STUN/TURN candidates) need to be allocated. This causes problems when even relatively small numbers of streams are used, as each MST can result in multiple m= lines, when things like simulcast or RTX are used.
+</t>
+<t>
+Plan B takes a different approach, and creates a hierarchy within SDP; a m= line defines an "envelope", and a=ssrc lines are used to describe individual MSTs within that envelope. In this manner, Plan B disconnects media streams from transport, and solves the following problems:
+</t>
+<t>
+<list style='symbols'>
+<t>Supports large numbers (&gt;&gt; 100) of MSTs</t>
+<t>No need to allocate ports for each MST (in initial or subsequent offers)</t>
+<t>Glareless add/removal of MSTs (since a=ssrc is not position-dependent)</t>
+<t>Simple binding of MediaStreamTrack to SDP (via MSID)</t>
+<t>Simple use of RTX and FEC streams within a single RTP session</t>
+<t>Impossible to get "out-of-sync" (e.g. getting RTX or FEC flow without its corresponding primary flow)</t>
+<t>Does not require BUNDLE (although BUNDLE can still help)</t>
+</list>
+</t>
+<t>
+Plan B mostly uses existing IETF standards, with a single new draft to cover how individual media sources can be accepted/rejected at the SSRC level via SDP. An extensive review of SDP attributes was performed, in order to determine which SDP attributes that exist at media level would need to also exist at "track" level, and the needed attributes are present in the aforementioned draft.
+</t>
+<t>
+Note that at the wire level, RTP is handled identically to Plan A (separate m= line for each MST), after a successful BUNDLE, in that MSTs are all sent in a single RTP session, and demuxed by SSRC. Therefore, Plan B could be converted to Plan A by a signaling-only gateway (although it would lose the advantages mentioned above).
+</t>
+</section>
+<section title='Detailed Design'>
+<section title='One m= line per [media-type, content] tuple'>
+<t>
+Regardless of how many MSTs are offered or used, only one m= line, by default, is used for each media type (e.g. audio or video). If the application wishes, it can request that a given MST be moved onto a separate m= line, by setting a new .content property on the desired MediaStreamTrack. (This helps with certain legacy interop cases, for example, an endpoint who expected to signal a screenshare video source on its own m= line.)
+</t>
+<t>
+This approach reduces the number of transports required to 2 in basic cases, or 3 if a data channel is used. In addition, it degrades gracefully in the simple case of a call with a single audio and video stream, for reasonable compatibility with existing systems.
+</t>
+</section>
+<section title='Streams identified by SSRC in signaling'>
+<t>
+MSTs are identified in signaling by SSRC, via RFC 5576 a=ssrc attributes. Each provider of MSTs (i.e. endpoint) indicates the MSTs they wish to send in their signaling message, and describes them using one of more SSRCs. Correlation of MediaStreamTracks with SSRCs is performed by the MSID attribute, a per-ssrc attribute that contains the MST's "id" property, and thereby indicates which MST corresponds to which SSRC.
+</t>
+<figure>
+<artwork>
+m=audio 49170 RTP/AVP 101       // main audio
+a=ssrc:1 msid:left-mic          // declare 3 outgoing audio sources
+a=ssrc:2 msid:center-mic
+a=ssrc:3 msid:right-mic
+</artwork>
+</figure>
+<t>
+Note that because of the signaling of SSRCs, SSRC collision is not a major issue. Each endpoint can ensure that the SSRCs it chooses don't collide, because it already knows about the SSRCs it has already used, as well as the ones the remote side has signaled. In the few cases where it can still occur - perhaps because of simultaneous signaling by both endpoints, the RFC 5576 a=previous-ssrc attribute can be used to change the conflicting SSRC to a non-conflicting one.
+</t>
+</section>
+<section title='Streams requested using remote-ssrc'>
+<t>
+When the offerer advertises its streams, the remote side can select which of them it wants to receive in its answer message. This is performed via draft-lennox-mmusic-sdp-source-selection-05, which introduces the concept of an a=remote-ssrc attribute. Through use of this attribute, the remote side can choose which of the offered streams should be turned on (or off), and what resolution, framerate and priority the recipient would like to receive. 
+</t>
+<figure>
+<artwork>
+m=audio 39170 RTP/AVP 101       // main audio
+a=remote-ssrc:1 recv:on         // just turn on the center mic
+</artwork>
+</figure>
+<t>
+The exact rules for how this logic works are specified in the draft.
+</t>
+</section>
+<section title='RTX, FEC, Simulcast'>
+<t>In cases where a MediaStreamTrack needs to correspond to more than one RTP flow, e.g. RTX, FEC, or Simulcast, the RFC 5576 a=ssrc-group concept is used to create a grouping of SSRCs for a single MST. Each SSRC is declared using a=ssrc attributes, the same MSID is shared between the SSRCs, and the a=ssrc-group attribute defines the behavior of the group.
+</t>
+<t>
+These groupings are used to perform demux of the incoming RTP streams and associate them (by SSRC) with their primary flows; this is the only way that a RTX or FEC stream can be correlated with its primary flow, when many streams are multiplexed in a single RTP session. The multiplexing of RTX and FEC in a single RTP session is already well-defined; RTX SSRC-multiplexing behavior is defined in RFC 4588, and FEC SSRC-multiplexing behavior is defined in RFC 5956.
+</t>
+<t>
+For multi-resolution simulcast, we can create a similar ssrc-group, and adapt the imageattr attribute defined in RFC 6236 for the a=ssrc line attribute indicate the sent resolution for a given simulcast stream. (This will be added to the source-selection draft).
+</t>
+<figure>
+<artwork>
+m=video 62537 RTP/SAVPF 96      // main video
+a=ssrc:5 msid:center-cam        // one source is simulcasting at two resolutions
+a=ssrc:5 imageattr:* [1280, 720]
+a=ssrc:51 msid:center-cam       // different SSRC, same MSID for simulcasts
+a=ssrc:51 imageattr:* [640, 360]
+a=ssrc-group:SIMULCAST 5 51
+a=ssrc:8 msid:slides            
+a=ssrc:9 msid:slides            // RTX SSRC
+a=ssrc-group:FID 8 9     
+</artwork>
+</figure>
+<t>
+As specified in [draft-lennox-mmusic-sdp-source-selection-05], the usage of RTX and FEC can be enabled or disabled on a per-MST basis.
+</t>
+<t>
+Note that at the wire level, the RTP flows will be the same as BUNDLEd session-multiplexed flows - the flows are multiplexed in a single RTP session, which means that SSRCs must be used to correlate a RTX or FEC flow with their primary flow. Using payload types for this correlation, while possible in certain simple cases, is not suitable for the general case of many MSTs, since individual PTs would have to be declared for every [codec, MST, primary/RTX/FEC] tuple, which quickly becomes unworkable.
+</t>
+</section>
+</section>
+<section title='Signaling Behavior'>
+<section title='Negotiation of new or legacy behavior'>
+<t>
+In order to know whether a given application supports Plan B, an attribute in the offer is needed. There are various options that could be used for this:
+<list style='symbols'>
+<t>a=ssrc isn't enough, since you might not have any send streams</t>
+<t>a=max-*-ssrc could work, but has additional semantics</t>
+<t>a=msid-semantic indicates that you understand MSIDs, and seems like the right fit here.</t>
+</list>
+</t>
+</section>
+<section title='New signaling flow'>
+<t>
+When both sides support Plan B, to properly allow both sides to indicate which MSTs they have, and allow the remote side to select the desired MSTs to receive, a 3-way handshake is needed (this is just math; the offer can't select the answerer's MSTs until they know about them). The expected flow for this would be for the caller to send an offer with its sources, then the callee would send back an answer with the sources it wants the caller to send, followed immediately by an offer with the sources that the callee has available to send. Finally, the answerer will reply back with the sources that it wants to request from the callee. The entire sequence can be done in 1.5 RTT.
+</t>
+<t>
+Typically a race condition exists between the receipt of the callee answer and the receipt of the callee media. However, this is avoided with Plan B, with its 3-way handshake. In addition, since the sources are known ahead of time by the recipient of said sources, it is prepared to demux them by SSRC without any signaling/media race.
+</t>
+</section>
+<section title='Legacy signaling flow'>
+<t>
+In the legacy case, Plan B degrades gracefully back to a single offer-answer sequence. Since there's no brokering of which sources should be sent, the "new" endpoint picks a default MST for each m= line, and sends just that one to the legacy endpoint. When receiving media from the legacy endpoint, the new endpoint creates a "default" MediaStream (containing a single MediaStreamTrack) for each m= line as when talking to any other legacy endpoint.
+</t>
+<t>
+Typically this will result in the negotiation of a single audio and single video MediaStreamTrack. However, if the .content property was used above, additional audio or video MediaStreamTracks could be specifically negotiated for the purpose of communicating with legacy equipment (e.g. an additional screenshare video MST).
+</t>
+</section>
+<section title='Interactions with BUNDLE'>
+<t>
+Since Plan B already muxes streams of the same media type onto a single m= line, BUNDLE is not as critical to its success as other approaches. Regardless, BUNDLE can be used to get down to just a single transport, by multiplexing the various media types together, and Plan B works well with BUNDLE. Since all streams are pre-identified by their SSRC attributes, their RTP flows can be demuxed easily even when grouped on the same 5-tuple.
+</t>
+</section>
+</section>
+<section title='Full Example'>
+<section title='New endpoint'>
+<t>
+The example below shows two new endpoints, A and B, establishing a Plan B call with audio, video, and screensharing; B requires a subset of the sources that A advertises.
+</t>
+<section title='Offer 1 (A->B): (A indicates streams to B)'>
+<figure>
+<artwork>
+a=msid-semantics:WMS            // I understand SSRCs and MSTs
+
+m=audio 49170 RTP/AVP 101       // main audio
+a=ssrc:1 msid:left-mic          // declare 3 outgoing audio sources, each with unique MSID
+a=ssrc:2 msid:center-mic
+a=ssrc:3 msid:right-mic
+[Candidates]
+
+m=video 62537 RTP/SAVPF 96      // main video
+a=ssrc:4 msid:left-cam          // declare 3 outgoing video sources
+a=ssrc:5 msid:center-cam        // one source is simulcasting at two resolutions, same codec
+a=ssrc:5 imageattr:* [1280, 720]
+a=ssrc:51 msid:center-cam       // different SSRC, same MSID for simulcasts
+a=ssrc:51 imageattr:* [640, 360]
+a=ssrc:6 msid:right-cam
+a=ssrc-group:SIMULCAST 5 51
+[Candidates]
+
+m=video 62538 RTP/SAVPF 96      // presentation
+a=content:slides                // [media, content] tuples must be unique in m= lines
+a=ssrc:8 msid:slides            // app decision to do this; could have been put in the m=video line above
+a=ssrc:9 msid:slides            // RTX SSRC
+a=ssrc-group:FID 8 9            // declaration that SSRC 9 is a repair flow for 8
+[Candidates]
+</artwork>
+</figure>
+</section>
+<section title='Answer 1 (B->A): (B requests streams from A)'>
+<figure>
+<artwork>
+a=msid-semantics:WMS            // I understand SSRCs and MSTs
+
+m=audio 39170 RTP/AVP 101       // main audio
+a=remote-ssrc:1 recv:on         // just turn on the center mic
+[Candidates]
+
+m=video 52537 RTP/SAVPF 96      // main video
+a=remote-ssrc:5 recv:off        // explicitly turn off the 720p feed
+a=remote-ssrc:51 recv:on        // explicitly turn on the 360p feed
+a=remote-ssrc:51 priority:1     // lower priority than slides (in this application)
+[Candidates]
+
+m=video 52538 RTP/SAVPF 96      // presentation
+a=content:slides
+a=remote-ssrc:8 recv:on         // turn on the slides feed with higher priority
+                                // FID is sent implicitly, unless explicitly rejected
+a=remote-ssrc:8 priority:2      // (sender uses priority when making BW decisions)
+[Candidates]
+</artwork>
+</figure>
+</section>
+<section title='Offer 2 (B->A): (B indicates streams to A)'>
+<figure>
+<artwork>
+a=msid-semantics:WMS            // I understand SSRCs and MSTs
+
+m=audio 39170 RTP/AVP 101       // main audio
+a=ssrc:101 msid:center-mic
+a=remote-ssrc:1 recv:on         // just turn on the center mic
+[Candidates]
+
+m=video 52537 RTP/SAVPF 96      // main video
+a=ssrc:105 msid:center-cam
+a=remote-ssrc:5 recv:off        // explicitly turn off the 720p feed
+a=remote-ssrc:51 recv:on        // explicitly turn on the 360p feed
+a=remote-ssrc:51 priority:1     // lower priority than slides (in this application)
+[Candidates]
+
+m=video 52538 RTP/SAVPF 96      // presentation
+a=content:slides
+a=remote-ssrc:8 recv:on         // turn on the slides feed with higher priority
+                               // FID is sent implicitly (unless explicitly rejected)
+a=remote-ssrc:8 priority:2      // (sender uses priority when making BW decisions)
+[Candidates]
+</artwork>
+</figure>
+</section>
+<section title='Answer 2 (A->B): (A requests streams from B)'>
+<figure>
+<artwork>
+a=msid-semantics:WMS            // I understand SSRCs and MSTs
+
+m=audio 49170 RTP/AVP 101       // main audio
+a=ssrc:1 msid:left-mic          // declare 3 outgoing audio sources, each with unique MSID
+a=ssrc:2 msid:center-mic
+a=ssrc:3 msid:right-mic
+a=remote-ssrc:101 on
+[Candidates]
+
+m=video 62537 RTP/SAVPF 96      // main video
+a=ssrc:4 msid:left-cam          // declare 3 outgoing video sources
+a=ssrc:5 msid:center-cam        // one source is simulcasting at two resolutions, same codec
+a=ssrc:5 imageattr:* [1280, 720]
+a=ssrc:51 msid:center-cam       // different SSRC, same MSID for simulcasts
+a=ssrc:51 imageattr:* [640, 360]
+a=ssrc:6 msid:right-cam
+a=ssrc-group:SIMULCAST 5 51
+a=remote-ssrc:105 on
+[Candidates]
+
+m=video 62538 RTP/SAVPF 96      // presentation
+a=content:slides                // [media, content] tuples must be unique in m= lines
+a=ssrc:8 msid:slides            // app decision to do this; could have been put in the m=video line above
+a=ssrc:9 msid:slides            // RTX SSRC
+a=ssrc-group:FID 8 9            // declaration that SSRC 9 is a repair flow for 8
+[Candidates]
+</artwork>
+</figure>
+</section>
+</section>
+<section title='Legacy endpoint'>
+<t>
+The example below shows a new endpoint, A, and a legacy endpoint, B, establishing a Plan B call with audio, video, and screensharing. B receives only A's default streams.
+</t>
+<section title='Offer 1 (A->B): (A indicates streams to B)'>
+<figure>
+<artwork>
+a=msid-semantics:WMS            // I understand SSRCs and MSTs
+
+m=audio 49170 RTP/AVP 101       // main audio
+a=ssrc:1 msid:left-mic          // declare 3 outgoing audio sources, each with unique MSID
+a=ssrc:2 msid:center-mic
+a=ssrc:3 msid:right-mic
+[Candidates]
+
+m=video 62537 RTP/SAVPF 96      // main video
+a=ssrc:4 msid:left-cam          // declare 3 outgoing video sources
+a=ssrc:5 msid:center-cam        // one source is simulcasting at two resolutions, same codec
+a=ssrc:5 imageattr:* [1280, 720]
+a=ssrc:51 msid:center-cam       // different SSRC, same MSID for simulcasts
+a=ssrc:51 imageattr:* [640, 360]
+a=ssrc:6 msid:right-cam
+a=ssrc-group:SIMULCAST 5 51
+[Candidates]
+
+m=video 62538 RTP/SAVPF 96      // presentation
+a=content:slides                // [media, content] tuples must be unique in m= lines
+a=ssrc:8 msid:slides            // app decision to do this; could have been put in the m=video line above
+a=ssrc:9 msid:slides            // RTX SSRC
+a=ssrc-group:FID 8 9            // declaration that SSRC 9 is a repair flow for 8
+[Candidates]
+</artwork>
+</figure>
+</section>
+<section title="Answer 1 (B->A): A accepts B's offer">
+<figure>
+<artwork>
+// Since endpoint doesn't understand a=ssrc or MSTs, sender should decide on a single
+// SSRC to send for each m=line, e.g. center-mic, center-cam (360p), slides
+// This results in the generation of a MediaStreamTrack with id "default".
+
+m=audio 39170 RTP/AVP 101       // main audio
+[Candidates]
+
+m=video 52537 RTP/SAVPF 96     // main video   
+[Candidates]
+
+m=video 52538 RTP/SAVPF 96     // presentation
+a=content:slides
+[Candidates]
+</artwork>
+</figure>
+</section>
+</section>
+</section>
+    <section title="Security Considerations">
+      <t>None.</t>
+    </section>
+    <section title="IANA Considerations">
+      <t>None.</t>
+    </section>
+    <section title='Acknowledgements'>
+      <t>Harald Alvestrand provided review and several suggestions on this document.</t>
+    </section>
+  </middle>
+  <back>
+  </back>
+</rfc>
